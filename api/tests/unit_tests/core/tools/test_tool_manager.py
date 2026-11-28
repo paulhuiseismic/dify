@@ -1148,14 +1148,11 @@ def test_list_providers_from_api_covers_builtin_api_workflow_and_mcp(
     assert {"hardcoded", "plugin-provider", "api-provider", "workflow-provider", "mcp-provider"} <= names
 
 
-def test_get_api_provider_controller_returns_controller_and_credentials(
-    monkeypatch: pytest.MonkeyPatch, tool_database: _ToolDatabase
-):
+def test_get_api_provider_controller_returns_controller_and_credentials(tool_database: _ToolDatabase):
     tenant_id = "00000000-0000-0000-0000-000000000001"
     provider = _api_provider(provider_id="00000000-0000-0000-0000-000000000002", tenant_id=tenant_id)
     tool_database.session.add(provider)
     tool_database.session.commit()
-    monkeypatch.setattr("core.tools.tool_manager.db", tool_database)
     built_controller, credentials = ToolManager.get_api_provider_controller(tenant_id, provider.id)
 
     assert built_controller.provider_id == provider.id
@@ -1164,14 +1161,11 @@ def test_get_api_provider_controller_returns_controller_and_credentials(
     assert credentials == provider.credentials
 
 
-def test_user_get_api_provider_masks_credentials_and_adds_labels(
-    monkeypatch: pytest.MonkeyPatch, tool_database: _ToolDatabase
-):
+def test_user_get_api_provider_masks_credentials_and_adds_labels(tool_database: _ToolDatabase):
     tenant_id = "00000000-0000-0000-0000-000000000001"
     provider = _api_provider(provider_id="00000000-0000-0000-0000-000000000002", tenant_id=tenant_id)
     tool_database.session.add(provider)
     tool_database.session.commit()
-    monkeypatch.setattr("core.tools.tool_manager.db", tool_database)
     cache = NoOpProviderCredentialCache()
     encrypter = ProviderConfigEncrypter(
         tenant_id=tenant_id,
@@ -1188,7 +1182,7 @@ def test_user_get_api_provider_masks_credentials_and_adds_labels(
     assert user_payload["labels"] == ["search"]
 
 
-def test_get_api_provider_controller_not_found_raises(monkeypatch: pytest.MonkeyPatch, tool_database: _ToolDatabase):
+def test_get_api_provider_controller_not_found_raises(tool_database: _ToolDatabase):
     provider_id = "00000000-0000-0000-0000-000000000002"
     tool_database.session.add(
         _api_provider(
@@ -1197,10 +1191,21 @@ def test_get_api_provider_controller_not_found_raises(monkeypatch: pytest.Monkey
         )
     )
     tool_database.session.commit()
-    monkeypatch.setattr("core.tools.tool_manager.db", tool_database)
 
     with pytest.raises(ToolProviderNotFoundError, match=f"api provider {provider_id} not found"):
         ToolManager.get_api_provider_controller("00000000-0000-0000-0000-000000000001", provider_id)
+
+
+def test_user_get_api_provider_rejects_another_tenants_provider(tool_database: _ToolDatabase):
+    provider = _api_provider(
+        provider_id="00000000-0000-0000-0000-000000000002",
+        tenant_id="00000000-0000-0000-0000-000000000099",
+    )
+    tool_database.session.add(provider)
+    tool_database.session.commit()
+
+    with pytest.raises(ValueError, match=f"you have not added provider {provider.name}"):
+        ToolManager.user_get_api_provider(provider.name, "00000000-0000-0000-0000-000000000001")
 
 
 def test_get_mcp_provider_controller_returns_controller(monkeypatch: pytest.MonkeyPatch, tool_database: _ToolDatabase):

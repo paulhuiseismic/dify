@@ -16,6 +16,7 @@ import contexts
 from configs import dify_config
 from core.agent.entities import AgentToolEntity
 from core.app.entities.app_invoke_entities import InvokeFrom
+from core.db.session_factory import session_factory
 from core.helper.module_import_helper import load_single_subclass_from_source
 from core.helper.position_helper import is_filtered
 from core.plugin.entities.plugin_daemon import CredentialType
@@ -742,7 +743,7 @@ class ToolManager:
                             db_provider=db_provider,
                             decrypt_credentials=False,
                             labels=provider_labels,
-                            session=db.session(),
+                            session=session,
                         )
                         result_providers[f"api_provider.{user_provider.name}"] = user_provider
 
@@ -797,31 +798,38 @@ class ToolManager:
         :param provider_id: the id of the provider
 
         :return: the provider controller, the credentials
+
+        Preconditions: the process-wide session factory is configured.
+        Postconditions: the provider row and its author are read in a short-lived
+        read-only session that is closed before returning; nothing is written. The
+        controller reloads tools through a session maker on the same bind. Raises
+        ``ToolProviderNotFoundError`` when ``tenant_id`` has no provider ``provider_id``.
         """
-        provider: ApiToolProvider | None = db.session.scalar(
-            select(ApiToolProvider)
-            .where(
-                ApiToolProvider.id == provider_id,
-                ApiToolProvider.tenant_id == tenant_id,
+        with session_factory.create_session() as session:
+            provider: ApiToolProvider | None = session.scalar(
+                select(ApiToolProvider)
+                .where(
+                    ApiToolProvider.id == provider_id,
+                    ApiToolProvider.tenant_id == tenant_id,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
 
-        if provider is None:
-            raise ToolProviderNotFoundError(f"api provider {provider_id} not found")
+            if provider is None:
+                raise ToolProviderNotFoundError(f"api provider {provider_id} not found")
 
-        auth_type = ApiProviderAuthType.NONE
-        provider_auth_type = provider.credentials.get("auth_type")
-        if provider_auth_type in ("api_key_header", "api_key"):  # backward compatibility
-            auth_type = ApiProviderAuthType.API_KEY_HEADER
-        elif provider_auth_type == "api_key_query":
-            auth_type = ApiProviderAuthType.API_KEY_QUERY
+            auth_type = ApiProviderAuthType.NONE
+            provider_auth_type = provider.credentials.get("auth_type")
+            if provider_auth_type in ("api_key_header", "api_key"):  # backward compatibility
+                auth_type = ApiProviderAuthType.API_KEY_HEADER
+            elif provider_auth_type == "api_key_query":
+                auth_type = ApiProviderAuthType.API_KEY_QUERY
 
-        controller = ApiToolProviderController.from_db(
-            provider,
-            auth_type,
-            session=db.session(),
-        )
+            controller = ApiToolProviderController.from_db(
+                provider,
+                auth_type,
+                session=session,
+            )
         controller.load_bundled_tools(provider.tools)
 
         return controller, provider.credentials
@@ -855,38 +863,45 @@ class ToolManager:
     def user_get_api_provider(cls, provider: str, tenant_id: str, mask: bool = True):
         """
         get api provider
+
+        Preconditions: the process-wide session factory is configured.
+        Postconditions: the provider row and its author are read in a short-lived
+        read-only session that is closed before credentials are decrypted and labels
+        are loaded; nothing is written. Raises ``ValueError`` when ``tenant_id`` has no
+        provider named ``provider``.
         """
         provider_name = provider
-        provider_obj: ApiToolProvider | None = db.session.scalar(
-            select(ApiToolProvider)
-            .where(
-                ApiToolProvider.tenant_id == tenant_id,
-                ApiToolProvider.name == provider,
+        with session_factory.create_session() as session:
+            provider_obj: ApiToolProvider | None = session.scalar(
+                select(ApiToolProvider)
+                .where(
+                    ApiToolProvider.tenant_id == tenant_id,
+                    ApiToolProvider.name == provider,
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
 
-        if provider_obj is None:
-            raise ValueError(f"you have not added provider {provider_name}")
+            if provider_obj is None:
+                raise ValueError(f"you have not added provider {provider_name}")
 
-        try:
-            credentials = _credentials_adapter.validate_json(provider_obj.credentials_str) or {}
-        except Exception:
-            credentials = {}
+            try:
+                credentials = _credentials_adapter.validate_json(provider_obj.credentials_str) or {}
+            except Exception:
+                credentials = {}
 
-        # package tool provider controller
-        auth_type = ApiProviderAuthType.NONE
-        credentials_auth_type = credentials.get("auth_type")
-        if credentials_auth_type in ("api_key_header", "api_key"):  # backward compatibility
-            auth_type = ApiProviderAuthType.API_KEY_HEADER
-        elif credentials_auth_type == "api_key_query":
-            auth_type = ApiProviderAuthType.API_KEY_QUERY
+            # package tool provider controller
+            auth_type = ApiProviderAuthType.NONE
+            credentials_auth_type = credentials.get("auth_type")
+            if credentials_auth_type in ("api_key_header", "api_key"):  # backward compatibility
+                auth_type = ApiProviderAuthType.API_KEY_HEADER
+            elif credentials_auth_type == "api_key_query":
+                auth_type = ApiProviderAuthType.API_KEY_QUERY
 
-        controller = ApiToolProviderController.from_db(
-            provider_obj,
-            auth_type,
-            session=db.session(),
-        )
+            controller = ApiToolProviderController.from_db(
+                provider_obj,
+                auth_type,
+                session=session,
+            )
         # init tool configuration
         encrypter, _ = create_tool_provider_encrypter(
             tenant_id=tenant_id,
